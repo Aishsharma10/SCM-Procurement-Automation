@@ -1,0 +1,539 @@
+{
+  "name": "SCM project (Aish)",
+  "nodes": [
+    {
+      "parameters": {
+        "operation": "download",
+        "fileId": {
+          "__rl": true,
+          "value": "1_iSpJCEBND7C1RmqGI6VM5YgRppJBJ1Q",
+          "mode": "list",
+          "cachedResultName": "inventory_data.xlsx",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/1_iSpJCEBND7C1RmqGI6VM5YgRppJBJ1Q/edit?usp=drivesdk&ouid=108085083311409917796&rtpof=true&sd=true"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.googleDrive",
+      "typeVersion": 3,
+      "position": [
+        224,
+        240
+      ],
+      "id": "2e001d14-662f-4fa2-b753-3a043cda4bb9",
+      "name": "Download file",
+      "credentials": {
+        "googleDriveOAuth2Api": {
+          "id": "Kx9mASbyhCpbZRda",
+          "name": "Aish drive"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "xlsx",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.extractFromFile",
+      "typeVersion": 1.1,
+      "position": [
+        416,
+        240
+      ],
+      "id": "1dfe9e2f-7eb8-4733-818d-9b15a48e18ed",
+      "name": "Extract from File"
+    },
+    {
+      "parameters": {
+        "sendTo": "aishwaryasharma10112003@gmail.com",
+        "subject": "={{ $json.subject }}",
+        "message": "={{ $json.email_html }}",
+        "options": {
+          "appendAttribution": false
+        }
+      },
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.2,
+      "position": [
+        1392,
+        160
+      ],
+      "id": "a14dd348-fd91-4fea-b343-548f2be740ae",
+      "name": "Send a message",
+      "webhookId": "82083a8d-9263-4876-9bb2-a4ca453ae85e",
+      "credentials": {
+        "gmailOAuth2": {
+          "id": "U4rSqbJx4RZFZOQe",
+          "name": "Gmail Aish"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "triggerAtHour": 9
+            }
+          ]
+        }
+      },
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.3,
+      "position": [
+        0,
+        0
+      ],
+      "id": "e9d85245-f70a-420c-b33f-6b1cb7cbfd36",
+      "name": "Schedule Trigger"
+    },
+    {
+      "parameters": {
+        "jsCode": "// ==================================================\n// SETUP: LISTS & LOOKUPS\n// ==================================================\nconst supplierAddressBook = {}; \nconst supplierRatings = {};     \nconst restockRequests = {};     \nconst quarantinedRequests = {}; \n\nlet lowStockCount = 0;\nlet delayedCount = 0;\nlet totalRefunds = 0;\nlet riskySupplierCount = 0;\n\nlet lowStockHTML = \"\";\nlet delayedHTML = \"\";\nlet returnsHTML = \"\";\nlet supplierHTML = \"\";\n\n// Helper function to normalize Excel text (removes hidden spaces & makes uppercase)\nfunction cleanName(name) {\n    if (!name) return null;\n    return name.toString().trim().toUpperCase();\n}\n\n// ==================================================\n// PASS 1: BUILD ADDRESS BOOK & RATINGS\n// ==================================================\nfor (const item of $input.all()) {\n  const data = item.json;\n  \n  // Use either Supplier_Name or Supplier column, depending on the sheet\n  const rawName = data.Supplier_Name || data.Supplier;\n  const cleanSupplierName = cleanName(rawName);\n\n  if (cleanSupplierName) {\n    if (data.Contact_Email) {\n        supplierAddressBook[cleanSupplierName] = data.Contact_Email;\n    }\n    // Explicitly check for undefined so we don't miss a 0 rating\n    if (data.Performance_Rating !== undefined && data.Performance_Rating !== \"\") {\n        supplierRatings[cleanSupplierName] = parseFloat(data.Performance_Rating);\n    }\n  }\n}\n\n// ==================================================\n// PASS 2: ANALYZE DATA\n// ==================================================\nfor (const item of $input.all()) {\n  const data = item.json;\n\n  // --- 1. INVENTORY & RESTOCK ---\n  if (data.Stock_Status === \"LOW STOCK\") {\n    lowStockCount++;\n    lowStockHTML += `<li><b>${data.Product}</b> (Stock: ${data.Current_Stock})</li>`;\n    \n    const supplierName = data.Supplier; \n    const cleanSupplierName = cleanName(supplierName);\n\n    if (cleanSupplierName) {\n      \n      // --- ADVANCED RESTOCK MATH (ROP & EOQ) ---\n      let dailyDemand = data.Daily_Demand || 5;   \n      let leadTimeDays = data.Lead_Time || 14;    \n      let safetyStock = data.Safety_Stock || 15;  \n      let orderCycleDays = 30;                    \n\n      let reorderPoint = (dailyDemand * leadTimeDays) + safetyStock;\n      let orderQuantity = (reorderPoint - data.Current_Stock) + (dailyDemand * orderCycleDays);\n\n      const productDetails = {\n          name: data.Product,\n          current: data.Current_Stock,\n          target: reorderPoint,  \n          orderQty: orderQuantity \n      };\n\n      // --- VENDOR QUARANTINE LOGIC (Using Normalized Names) ---\n      const rating = supplierRatings[cleanSupplierName] !== undefined ? supplierRatings[cleanSupplierName] : 5.0;\n\n      if (rating < 4.0) {\n        // Bad Vendor: Send to Quarantine for Manager Review\n        // We use the original supplierName for the email so it looks nice, not the ALL CAPS version\n        if (!quarantinedRequests[supplierName]) {\n          quarantinedRequests[supplierName] = [];\n        }\n        quarantinedRequests[supplierName].push(productDetails);\n      } else {\n        // Good Vendor: Proceed with Automated Restock Email\n        if (!restockRequests[supplierName]) {\n          restockRequests[supplierName] = [];\n        }\n        restockRequests[supplierName].push(productDetails);\n      }\n    }\n  }\n\n  // --- 2. ORDERS ---\n  if (data.Order_Status) {\n    let expectedDate;\n    if (typeof data.Expected_Delivery === 'number') {\n      expectedDate = new Date(Math.round((data.Expected_Delivery - 25569) * 86400 * 1000));\n    } else {\n      expectedDate = new Date(data.Expected_Delivery);\n    }\n    \n    let today = new Date();\n    if ((today > expectedDate || data.Order_Status === 'Delayed') && data.Order_Status !== 'Delivered') {\n      delayedCount++;\n      delayedHTML += `<li>Order <b>${data.Order_ID}</b> (${data.Customer_Name})</li>`;\n    }\n  }\n\n  // --- 3. RETURNS ---\n  if (data.Return_Reason) {\n    totalRefunds += (parseFloat(data.Refund_Amount) || 0);\n    returnsHTML += `<li>Order <b>${data.Order_ID}</b>: ${data.Return_Reason} (-$${data.Refund_Amount})</li>`;\n  }\n\n  // --- 4. SUPPLIERS ---\n  if (data.Performance_Rating && data.Performance_Rating < 4.0) {\n    riskySupplierCount++;\n    supplierHTML += `<li><b>${data.Supplier_Name}</b> (Rating: ${data.Performance_Rating}/5.0)</li>`;\n  }\n}\n\n// ==================================================\n// OUTPUT GENERATION\n// ==================================================\nconst finalOutput = [];\n\n// 1. Executive Summary\nlet summaryBody = `\n<div style=\"font-family: Arial, sans-serif; color: #333; max-width: 600px; border: 1px solid #ddd; padding: 20px;\">\n  <h2 style=\"color: #2c3e50;\">📉 Daily SCM Executive Summary</h2>\n  <div style=\"background: #ffebee; padding: 10px; margin-bottom: 20px;\">\n    <h3 style=\"margin: 0; color: #c62828;\">$${totalRefunds.toLocaleString()}</h3>\n    <p style=\"margin: 0; font-size: 12px;\">Refund Losses</p>\n  </div>\n  ${lowStockCount > 0 ? `<p><b>📦 Low Stock:</b></p><ul>${lowStockHTML}</ul>` : \"\"}\n  ${riskySupplierCount > 0 ? `<p><b>🏭 Risky Suppliers:</b></p><ul>${supplierHTML}</ul>` : \"\"}\n  ${delayedCount > 0 ? `<p><b>🚚 Delays:</b></p><ul>${delayedHTML}</ul>` : \"\"}\n  ${totalRefunds > 0 ? `<p><b>💸 Returns:</b></p><ul>${returnsHTML}</ul>` : \"\"}\n  <p style=\"margin-top: 30px; font-size: 11px; color: #999;\">Automated by n8n Control Tower</p>\n</div>\n`;\n\nfinalOutput.push({ \n  json: { \n    subject: `SCM Alert: $${totalRefunds} Refunds & ${delayedCount} Delays`,\n    email_html: summaryBody\n  } \n});\n\n// 2. Automated Draft Emails (GOOD VENDORS ONLY)\nfor (const [supplier, products] of Object.entries(restockRequests)) {\n  const cleanSupplierName = cleanName(supplier);\n  const targetEmail = supplierAddressBook[cleanSupplierName] || \"unknown@supplier.com\";\n  \n  const productRows = products.map(p => {\n      const needed = p.orderQty; \n      return `\n      <tr>\n        <td style=\"padding: 8px; border-bottom: 1px solid #ddd;\">${p.name}</td>\n        <td style=\"padding: 8px; border-bottom: 1px solid #ddd; color: red;\">${p.current}</td>\n        <td style=\"padding: 8px; border-bottom: 1px solid #ddd;\">${p.target}</td>\n        <td style=\"padding: 8px; border-bottom: 1px solid #ddd; font-weight: bold;\">+${needed}</td>\n      </tr>`;\n  }).join('');\n\n  const draftBody = `\n  <div style=\"font-family: sans-serif; padding: 20px; border: 1px solid #eee;\">\n    <p><b>TO:</b> ${targetEmail}</p>\n    <p><b>SUBJECT:</b> Urgent Restock Request - ${supplier}</p>\n    <hr>\n    <p>Dear ${supplier} Team,</p>\n    <p>Our system has detected the following items are below safe stock levels. Please process an order for the quantities below.</p>\n    \n    <table style=\"width: 100%; border-collapse: collapse; margin-top: 10px;\">\n      <tr style=\"background-color: #f8f9fa; text-align: left;\">\n        <th style=\"padding: 8px; border-bottom: 2px solid #ddd;\">Product</th>\n        <th style=\"padding: 8px; border-bottom: 2px solid #ddd;\">Current</th>\n        <th style=\"padding: 8px; border-bottom: 2px solid #ddd;\">Target (ROP)</th>\n        <th style=\"padding: 8px; border-bottom: 2px solid #ddd;\">Order Qty</th>\n      </tr>\n      ${productRows}\n    </table>\n\n    <p style=\"margin-top: 20px;\">Please send a quote.</p>\n    <p>Regards,<br>Procurement Automation System</p>\n  </div>\n  `;\n\n  finalOutput.push({\n    json: {\n      subject: `[DRAFT] Restock Needed: ${supplier}`,\n      email_html: draftBody\n    }\n  });\n}\n\n// 3. Internal Manager Quarantine Alerts (BAD VENDORS)\nif (Object.keys(quarantinedRequests).length > 0) {\n  let quarantineHTML = \"\";\n  \n  for (const [supplier, products] of Object.entries(quarantinedRequests)) {\n    const cleanSupplierName = cleanName(supplier);\n    const rating = supplierRatings[cleanSupplierName] !== undefined ? supplierRatings[cleanSupplierName] : \"Unknown\";\n    \n    quarantineHTML += `<h4 style=\"color: #c62828;\">🚨 QUARANTINED: ${supplier} (Rating: ${rating}/5.0)</h4><ul>`;\n    for (const p of products) {\n      quarantineHTML += `<li><b>${p.name}</b> - Current Stock: <span style=\"color:red\">${p.current}</span> (Need ${p.orderQty} units)</li>`;\n    }\n    quarantineHTML += `</ul>`;\n  }\n\n  const quarantineBody = `\n  <div style=\"font-family: Arial, sans-serif; padding: 20px; border: 2px solid #c62828; background-color: #fffaf0;\">\n    <h2 style=\"color: #c62828;\">⚠️ URGENT: Supplier Quarantine Alert</h2>\n    <p>The automated restock system has <b>halted</b> purchase orders for the following items because their primary supplier has fallen below the 4.0 quality threshold.</p>\n    <p><b>Action Required:</b> Please manually review and source these parts from a backup vendor immediately to prevent stockouts.</p>\n    <hr style=\"border-top: 1px solid #ccc;\">\n    ${quarantineHTML}\n  </div>\n  `;\n\n  finalOutput.push({\n    json: {\n      subject: `[ACTION REQUIRED] Vendor Quarantine - Manual Sourcing Needed`,\n      email_html: quarantineBody\n    }\n  });\n}\n\nreturn finalOutput;"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1136,
+        16
+      ],
+      "id": "9eb56552-1e87-4b87-b24d-45edb7700038",
+      "name": "Code in JavaScript"
+    },
+    {
+      "parameters": {
+        "operation": "download",
+        "fileId": {
+          "__rl": true,
+          "value": "1aBsyJdnqkwTsGucbh0wk6RCOwdD_vZcU",
+          "mode": "list",
+          "cachedResultName": "orders_data.xlsx",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/1aBsyJdnqkwTsGucbh0wk6RCOwdD_vZcU/edit?usp=drivesdk&ouid=108085083311409917796&rtpof=true&sd=true"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.googleDrive",
+      "typeVersion": 3,
+      "position": [
+        224,
+        80
+      ],
+      "id": "4aa1407f-02f5-4c3d-a5ae-ec772318d05a",
+      "name": "Download file1",
+      "credentials": {
+        "googleDriveOAuth2Api": {
+          "id": "Kx9mASbyhCpbZRda",
+          "name": "Aish drive"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "xlsx",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.extractFromFile",
+      "typeVersion": 1.1,
+      "position": [
+        416,
+        80
+      ],
+      "id": "d62e38bf-895d-4be6-8af5-b0c8dcb6eaf6",
+      "name": "Extract from File1"
+    },
+    {
+      "parameters": {},
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 3.2,
+      "position": [
+        672,
+        160
+      ],
+      "id": "c06da16e-a6b4-4fe2-a2e0-7d9f92a1ef8b",
+      "name": "Merge"
+    },
+    {
+      "parameters": {
+        "operation": "download",
+        "fileId": {
+          "__rl": true,
+          "value": "1FBdwiSci7yfazTiSJJ9zKu9Y-N8_N_Cy",
+          "mode": "list",
+          "cachedResultName": "returns.xlsx",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/1FBdwiSci7yfazTiSJJ9zKu9Y-N8_N_Cy/edit?usp=drivesdk&ouid=108085083311409917796&rtpof=true&sd=true"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.googleDrive",
+      "typeVersion": 3,
+      "position": [
+        224,
+        -80
+      ],
+      "id": "cb992ba3-07c9-4662-889f-4e8a81ee5b22",
+      "name": "Download file2",
+      "credentials": {
+        "googleDriveOAuth2Api": {
+          "id": "Kx9mASbyhCpbZRda",
+          "name": "Aish drive"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "download",
+        "fileId": {
+          "__rl": true,
+          "value": "177OHvsA50riG5BUAYOYO_2rcwYKtrqp8",
+          "mode": "list",
+          "cachedResultName": "suppliers.xlsx",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/177OHvsA50riG5BUAYOYO_2rcwYKtrqp8/edit?usp=drivesdk&ouid=108085083311409917796&rtpof=true&sd=true"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.googleDrive",
+      "typeVersion": 3,
+      "position": [
+        224,
+        -224
+      ],
+      "id": "d5162032-10c2-46d7-afb5-8a09d1c352f5",
+      "name": "Download file3",
+      "credentials": {
+        "googleDriveOAuth2Api": {
+          "id": "Kx9mASbyhCpbZRda",
+          "name": "Aish drive"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "xlsx",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.extractFromFile",
+      "typeVersion": 1.1,
+      "position": [
+        416,
+        -224
+      ],
+      "id": "f037eb7c-282e-43c4-96b8-343e36e3bfa3",
+      "name": "Extract from File2"
+    },
+    {
+      "parameters": {
+        "operation": "xlsx",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.extractFromFile",
+      "typeVersion": 1.1,
+      "position": [
+        416,
+        -80
+      ],
+      "id": "3331ef49-8738-41bc-a530-aab7369a584c",
+      "name": "Extract from File3"
+    },
+    {
+      "parameters": {},
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 3.2,
+      "position": [
+        672,
+        -160
+      ],
+      "id": "da35ca2d-2508-40f9-9dc6-2e340094c221",
+      "name": "Merge1"
+    },
+    {
+      "parameters": {},
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 3.2,
+      "position": [
+        864,
+        16
+      ],
+      "id": "feef7fc6-96c5-498b-8f8f-b897f733a803",
+      "name": "Merge2"
+    },
+    {
+      "parameters": {
+        "operation": "appendOrUpdate",
+        "documentId": {
+          "__rl": true,
+          "value": "1T9MGFg2BawDhw31m7qPv9-lWFQLSp3ns2t4QdzYCZ4Y",
+          "mode": "list",
+          "cachedResultName": "SCM_Master_History",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/1T9MGFg2BawDhw31m7qPv9-lWFQLSp3ns2t4QdzYCZ4Y/edit?usp=drivesdk"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "gid=0",
+          "mode": "list",
+          "cachedResultName": "Sheet1",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/1T9MGFg2BawDhw31m7qPv9-lWFQLSp3ns2t4QdzYCZ4Y/edit#gid=0"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "Date": "={{ $json.stats_date }}",
+            "Risky_Supplier_Count": "={{ $json.stats_risky_suppliers }}",
+            "Low_Stock_Count": "={{ $json.stats_low_stock }}",
+            "Delayed_Orders_Count": "={{ $json.stats_delays }}",
+            "Total_Refunds": "={{ $json.stats_refunds }}"
+          },
+          "matchingColumns": [
+            "Date"
+          ],
+          "schema": [
+            {
+              "id": "Date",
+              "displayName": "Date",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "Total_Refunds",
+              "displayName": "Total_Refunds",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Delayed_Orders_Count",
+              "displayName": "Delayed_Orders_Count",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Low_Stock_Count",
+              "displayName": "Low_Stock_Count",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Risky_Supplier_Count",
+              "displayName": "Risky_Supplier_Count",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.7,
+      "position": [
+        1392,
+        -80
+      ],
+      "id": "e6ef653b-16b6-4b7b-b2e4-4e091e673329",
+      "name": "Append or update row in sheet",
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "80SM362yPP1j2KsG",
+          "name": "Google Sheets Aish"
+        }
+      }
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Download file": {
+      "main": [
+        [
+          {
+            "node": "Extract from File",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Extract from File": {
+      "main": [
+        [
+          {
+            "node": "Merge",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Schedule Trigger": {
+      "main": [
+        [
+          {
+            "node": "Download file1",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Download file",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Download file2",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Download file3",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Code in JavaScript": {
+      "main": [
+        [
+          {
+            "node": "Send a message",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Append or update row in sheet",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Download file1": {
+      "main": [
+        [
+          {
+            "node": "Extract from File1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Extract from File1": {
+      "main": [
+        [
+          {
+            "node": "Merge",
+            "type": "main",
+            "index": 1
+          }
+        ]
+      ]
+    },
+    "Merge": {
+      "main": [
+        [
+          {
+            "node": "Merge2",
+            "type": "main",
+            "index": 1
+          }
+        ]
+      ]
+    },
+    "Download file2": {
+      "main": [
+        [
+          {
+            "node": "Extract from File3",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Download file3": {
+      "main": [
+        [
+          {
+            "node": "Extract from File2",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Extract from File3": {
+      "main": [
+        [
+          {
+            "node": "Merge1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Extract from File2": {
+      "main": [
+        [
+          {
+            "node": "Merge1",
+            "type": "main",
+            "index": 1
+          }
+        ]
+      ]
+    },
+    "Merge1": {
+      "main": [
+        [
+          {
+            "node": "Merge2",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Merge2": {
+      "main": [
+        [
+          {
+            "node": "Code in JavaScript",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Append or update row in sheet": {
+      "main": [
+        []
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "availableInMCP": false
+  },
+  "versionId": "9c3c2973-a968-4e18-b3a5-2d48bc070fef",
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": "d1ee15a3edc60dccf1bc0f492bb676e584159c1a7d2ec84d6adb8607b884a90f"
+  },
+  "id": "nGPO0AQJq4cPYbqF",
+  "tags": []
+}
